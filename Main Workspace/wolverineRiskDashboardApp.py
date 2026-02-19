@@ -7,6 +7,8 @@ import requests
 import plotly.graph_objects as go
 import streamlit as st
 
+SESSION = requests.Session()
+
 
 st.set_page_config(page_title = 'PriceOnlyRiskDashboardGoBlue', layout = 'wide')
 st.markdown('''
@@ -36,6 +38,7 @@ def _single_page_tabs(labels):
     return [st.container() for _ in labels]
 st.tabs = _single_page_tabs
 
+@st.cache_data(ttl=60*30, show_spinner=False)
 
 def fetchAlphaVantage(symbol: str, apiKey: str, years: int = 3) -> pd.DataFrame:
     url = "https://www.alphavantage.co/query"
@@ -45,13 +48,23 @@ def fetchAlphaVantage(symbol: str, apiKey: str, years: int = 3) -> pd.DataFrame:
         "outputsize": "compact",
         "apikey": apiKey
     }
-    response = requests.get(url, params = parameters, timeout = 30)
+    response = SESSION.get(url, params=parameters, timeout=30)
     data = response.json()
+    if response.status_code != 200:
+        raise RuntimeError(f"HTTP {response.status_code}: {response.text[:200]}")
     timeSeriesKey = "Time Series (Daily)"
 
     if timeSeriesKey not in data:
-        message = data.get("Note") or data.get("Error Message") or "Unknown error"
-        raise RuntimeError(message)
+        # Alpha Vantage common failure modes
+        if "Note" in data:
+            raise RuntimeError(f"Alpha Vantage rate limit hit: {data['Note']}")
+        if "Error Message" in data:
+            raise RuntimeError(f"Alpha Vantage error: {data['Error Message']}")
+        if "Information" in data:
+            raise RuntimeError(f"Alpha Vantage info: {data['Information']}")
+
+        # Debug fallback: show response keys / snippet
+        raise RuntimeError(f"Alpha Vantage unexpected response for {symbol}. Keys: {list(data.keys())}")
 
     frame = pd.DataFrame.from_dict(data[timeSeriesKey], orient = "index").apply(pd.to_numeric, errors = "coerce")
     frame.index = pd.to_datetime(frame.index)
@@ -451,12 +464,17 @@ def loadPortfolioPriceSeries(inputParameters, apiKey):
         weightArray = np.ones(len(symbols), dtype=float) / len(symbols)
 
     closeFrames = []
-    for sym in symbols:
+    for i, sym in enumerate(symbols):
         try:
             frame = fetchAlphaVantage(sym, apiKey, years=inputParameters["years"])
             closeSeries = frame["Close"].copy()
             closeSeries.name = sym
             closeFrames.append(closeSeries)
+
+            # Alpha Vantage free-tier safety: sleep between tickers
+            if i < len(symbols) - 1:
+                time.sleep(12)
+
         except Exception as e:
             st.error(f"Error fetching data for {sym}: {e}")
             return None, None
